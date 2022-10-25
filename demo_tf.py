@@ -96,11 +96,10 @@ epsilon_0 = 8.8541878128 * 10**-12  # Vacuum permittivity
 mu_0 = 4 * np.pi * 10**-7  # Vacuum permeability
 Z0 = np.sqrt(mu_0 / epsilon_0)  # Vacuum impedance
 I0 = 0.5 / Z0  # Intensity of electromagnetic field
-
 c0 = 1 / np.sqrt(mu_0 * epsilon_0)  # Speed of light in vacuum
+
 _scaling_m = 1e6
 _L_ref = 1/_scaling_m
-
 _f_afac = _L_ref/c0
 _beta_afac = 1/c0
 
@@ -108,7 +107,6 @@ n_bkg = 1
 eps_bkg = n_bkg**2
 
 omega_p = 9.1764e15*_f_afac
-print(omega_p)
 gamma = 2.4308e14*_f_afac
 beta = 6.1776e5*_beta_afac
 
@@ -126,7 +124,7 @@ pml_size = mesh_factor * 8.0e-3
 tf_tag = 1
 bkg_tag = 2
 pml_tag = 3
-hw_tag = 4
+hw_tag = 4  # tag for the hard-wall facet
 scatt_tag = 5
 
 model = None
@@ -147,7 +145,7 @@ MPI.COMM_WORLD.barrier()
 
 degree = 3
 curl_el = ufl.FiniteElement("N1curl", domain.ufl_cell(), degree)
-div_el = ufl.FiniteElement("N1div", domain.ufl_cell(), degree - 1)
+div_el = ufl.FiniteElement("N1div", domain.ufl_cell(), degree)
 lagr_el = ufl.FiniteElement("Lagrange", domain.ufl_cell(), degree)
 V = fem.FunctionSpace(domain, ufl.MixedElement(
     [curl_el, lagr_el, div_el, lagr_el]))
@@ -161,8 +159,7 @@ dPml = dx(pml_tag)
 wl0 = 0.3  # Wavelength of the background field
 k0 = 2 * np.pi / wl0  # Wavevector of the background field
 # Angular frequency of the background field
-omega0 = k0*_scaling_m * c0 * _f_afac
-print(omega0)
+omega0 = (k0 * _scaling_m * c0) * _f_afac
 theta = np.pi / 2  # Angle of incidence of the background field
 m_list = [0]  # list of harmonics
 
@@ -174,7 +171,7 @@ pml_coords = ufl.as_vector((
     pml_coordinate(rho, r, alpha, k0, radius_dom, radius_pml),
     pml_coordinate(z, r, alpha, k0, radius_dom, radius_pml)))
 
-eps_pml, mu_pml = create_eps_mu(pml_coords, rho, 1, 1)
+eps_pml, mu_pml = create_eps_mu(pml_coords, rho, eps_bkg, 1)
 
 gcs = np.pi * radius_sph**2
 
@@ -185,10 +182,11 @@ div_space = V.sub(2).collapse()[0]
 bc_dofs = fem.locate_dofs_topological(
     (V.sub(2), div_space), facet_tags.dim, hw_facet)
 
-u_bc = fem.Function(div_space)
-with u_bc.vector.localForm() as loc:
+hw_bc = fem.Function(div_space)
+with hw_bc.vector.localForm() as loc:
     loc.set(0)
-bc = fem.dirichletbc(u_bc, bc_dofs, V.sub(2))
+
+bc = fem.dirichletbc(hw_bc, bc_dofs, V.sub(2))
 
 dTf = dx(tf_tag)
 
@@ -375,8 +373,6 @@ for l in range(1, num_l + 1):
 
         q_abs_analyt = -q_ext - q_sca
 
-
-#q_abs_analyt = 3.853975363140860894e-02
 
 print(q_abs_analyt)
 
