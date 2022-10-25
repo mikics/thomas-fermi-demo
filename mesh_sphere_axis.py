@@ -18,7 +18,7 @@ def generate_mesh_sphere_axis(
     gmsh.model.add("geometry")
 
     gmsh.model.occ.addCircle(
-        0, 0, 0, radius_sph * 0.5, angle1=-pi / 2, angle2=pi / 2, tag=1)
+        0, 0, 0, radius_sph * 0.8, angle1=-pi / 2, angle2=pi / 2, tag=1)
     gmsh.model.occ.addCircle(
         0, 0, 0, radius_sph, angle1=-pi / 2, angle2=pi / 2, tag=2)
     gmsh.model.occ.addCircle(

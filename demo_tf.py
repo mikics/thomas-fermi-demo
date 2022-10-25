@@ -3,12 +3,12 @@ from functools import partial
 
 import numpy as np
 import ufl
-from dolfinx import fem, mesh, plot
+from dolfinx import fem, plot
 from dolfinx.io import VTXWriter
 from dolfinx.io.gmshio import model_to_mesh
 from mpi4py import MPI
 from petsc4py import PETSc
-from scipy.special import jv, jvp
+from scipy.special import jv, jvp, spherical_jn, spherical_yn
 
 from mesh_sphere_axis import generate_mesh_sphere_axis
 
@@ -97,16 +97,24 @@ mu_0 = 4 * np.pi * 10**-7  # Vacuum permeability
 Z0 = np.sqrt(mu_0 / epsilon_0)  # Vacuum impedance
 I0 = 0.5 / Z0  # Intensity of electromagnetic field
 
+c0 = 1 / np.sqrt(mu_0 * epsilon_0)  # Speed of light in vacuum
+_scaling_m = 1e6
+_L_ref = 1/_scaling_m
+
+_f_afac = _L_ref/c0
+_beta_afac = 1/c0
+
 n_bkg = 1
 eps_bkg = n_bkg**2
 
-omega_p = 9.1764e15
-gamma = 2.4308e14
-beta = 6.1776e5
+omega_p = 9.1764e15*_f_afac
+print(omega_p)
+gamma = 2.4308e14*_f_afac
+beta = 6.1776e5*_beta_afac
 
 radius_sph = 0.002
 radius_dom = 0.2
-radius_scatt = 0.4 * radius_dom
+radius_scatt = 0.8 * radius_dom
 radius_pml = 0.025
 
 mesh_factor = 1
@@ -115,7 +123,7 @@ on_sph_size = mesh_factor * 0.06e-3
 scatt_size = mesh_factor * 10.0e-3
 pml_size = mesh_factor * 8.0e-3
 
-au_tag = 1
+tf_tag = 1
 bkg_tag = 2
 pml_tag = 3
 hw_tag = 4
@@ -128,7 +136,7 @@ if MPI.COMM_WORLD.rank == 0:
     model = generate_mesh_sphere_axis(
         radius_sph, radius_scatt, radius_dom, radius_pml,
         in_sph_size, on_sph_size, scatt_size, pml_size,
-        au_tag, bkg_tag, pml_tag, hw_tag, scatt_tag)
+        tf_tag, bkg_tag, pml_tag, hw_tag, scatt_tag)
 
 model = MPI.COMM_WORLD.bcast(model, root=0)
 domain, cell_tags, facet_tags = model_to_mesh(
@@ -139,7 +147,7 @@ MPI.COMM_WORLD.barrier()
 
 degree = 3
 curl_el = ufl.FiniteElement("N1curl", domain.ufl_cell(), degree)
-div_el = ufl.FiniteElement("N1div", domain.ufl_cell(), degree-1)
+div_el = ufl.FiniteElement("N1div", domain.ufl_cell(), degree - 1)
 lagr_el = ufl.FiniteElement("Lagrange", domain.ufl_cell(), degree)
 V = fem.FunctionSpace(domain, ufl.MixedElement(
     [curl_el, lagr_el, div_el, lagr_el]))
@@ -147,15 +155,16 @@ V = fem.FunctionSpace(domain, ufl.MixedElement(
 dx = ufl.Measure("dx", domain, subdomain_data=cell_tags,
                  metadata={'quadrature_degree': 60})
 
-dDom = dx((au_tag, bkg_tag))
+dDom = dx((tf_tag, bkg_tag))
 dPml = dx(pml_tag)
 
-wl0 = 0.4  # Wavelength of the background field
+wl0 = 0.3  # Wavelength of the background field
 k0 = 2 * np.pi / wl0  # Wavevector of the background field
-c0 = 1 / np.sqrt(epsilon_0 * mu_0)
-omega0 = k0 * c0  # Angular frequency of the background field
-theta = np.pi / 4  # Angle of incidence of the background field
-m_list = [0, 1]  # list of harmonics
+# Angular frequency of the background field
+omega0 = k0*_scaling_m * c0 * _f_afac
+print(omega0)
+theta = np.pi / 2  # Angle of incidence of the background field
+m_list = [0]  # list of harmonics
 
 rho, z = ufl.SpatialCoordinate(domain)
 alpha = 5
@@ -173,14 +182,22 @@ hw_facet = facet_tags.find(hw_tag)
 
 div_space = V.sub(2).collapse()[0]
 
-bc_dofs = fem.locate_dofs_topological(div_space, facet_tags.dim, hw_facet)
+bc_dofs = fem.locate_dofs_topological(
+    (V.sub(2), div_space), facet_tags.dim, hw_facet)
 
-u_bc = fem.Function(V)
+u_bc = fem.Function(div_space)
 with u_bc.vector.localForm() as loc:
     loc.set(0)
-bc = fem.dirichletbc(u_bc, bc_dofs)
+bc = fem.dirichletbc(u_bc, bc_dofs, V.sub(2))
 
-dAu = dx(au_tag)
+dTf = dx(tf_tag)
+
+E_func_space = fem.FunctionSpace(domain, ufl.MixedElement(
+    [curl_el, lagr_el]))
+P_func_space = fem.FunctionSpace(domain, ufl.MixedElement(
+    [div_el, lagr_el]))
+
+Eh_m = fem.Function(E_func_space)
 
 for m in m_list:
 
@@ -192,8 +209,6 @@ for m in m_list:
     v_m = ufl.as_vector((v_rz_m[0], v_rz_m[1], v_p_m))
     k_m = ufl.as_vector((k_rz_m[0], k_rz_m[1], k_p_m))
 
-    E_func_space = fem.FunctionSpace(domain, ufl.MixedElement(
-        [curl_el, lagr_el]))
     Eb_m = fem.Function(E_func_space)
     f_rz = partial(background_field_rz, theta, n_bkg, k0, m)
     f_p = partial(background_field_p, theta, n_bkg, k0, m)
@@ -208,31 +223,36 @@ for m in m_list:
 
     F = - ufl.inner(curl_Es_m, curl_v_m) * rho * dDom \
         + k0 ** 2 * ufl.inner(Es_m, v_m) * rho * dDom \
-        + omega0 ** 2 * mu_0 * ufl.inner(P_m, v_m) * rho * dAu \
-        - beta ** 2 * div_P_m * ufl.conj(div_k_m) * rho * dAu \
-        + omega0 ** 2 * ufl.inner(P_m, k_m) * rho * dAu \
-        + 1j * gamma * omega0 * ufl.inner(P_m, k_m) * rho * dAu \
-        + epsilon_0 * omega_p ** 2 * ufl.inner(Es_m, k_m) * rho * dAu \
-        + epsilon_0 * omega_p ** 2 * ufl.inner(Eb_m, k_m) * rho * dAu \
+        + omega0 ** 2 * ufl.inner(P_m, v_m) * rho * dTf \
+        - beta ** 2 * div_P_m * ufl.conj(div_k_m) * rho * dTf \
+        + omega0 ** 2 * ufl.inner(P_m, k_m) * rho * dTf \
+        + 1j * gamma * omega0 * ufl.inner(P_m, k_m) * rho * dTf \
+        + omega_p ** 2 * ufl.inner(Es_m, k_m) * rho * dTf \
+        + omega_p ** 2 * ufl.inner(Eb_m, k_m) * rho * dTf \
         - ufl.inner(ufl.inv(mu_pml) * curl_Es_m, curl_v_m) * rho * dPml \
         + k0 ** 2 * ufl.inner(eps_pml * Es_m, v_m) * rho * dPml
 
     a, L = ufl.lhs(F), ufl.rhs(F)
 
-    # a.ident_zeros()
-
-    problem = fem.petsc.LinearProblem(a, L, bcs=[], petsc_options={
+    problem = fem.petsc.LinearProblem(a, L, bcs=[bc], petsc_options={
                                       "ksp_type": "preonly", "pc_type": "lu"})
     # Assemble lhs
     problem._A.zeroEntries()
 
     fem.petsc._assemble_matrix_mat(problem._A, problem._a, bcs=problem.bcs)
     problem._A.assemble()
+
     diagonal = problem._A.getDiagonal()
+    diagonal_values = diagonal.array
+
     zero_rows = problem._A.findZeroRows()
-    vals = diagonal.array
-    vals[zero_rows] = 1
+    zero_rows_values = zero_rows.array
+
+    diagonal_values[zero_rows_values] = 1
+    diagonal.array = diagonal_values
+
     problem._A.setDiagonal(diagonal, PETSc.InsertMode.INSERT_VALUES)
+
     # Assemble rhs
     with problem._b.localForm() as b_loc:
         b_loc.set(0)
@@ -254,15 +274,11 @@ for m in m_list:
     Esh_m.sub(0).interpolate(Esh_rz_m)
     Esh_m.sub(1).interpolate(Esh_p_m)
 
-    P_func_space = fem.FunctionSpace(domain, ufl.MixedElement(
-        [div_el, lagr_el]))
     Ph_m = fem.Function(P_func_space)
     Ph_m.sub(0).interpolate(Ph_rz_m)
     Ph_m.sub(1).interpolate(Ph_p_m)
 
     Jh_m = 1j * omega0 * Ph_m
-
-    Eh_m = fem.Function(E_func_space)
 
     Eh_m.x.array[:] = Eb_m.x.array[:] + Esh_m.x.array[:]
 
@@ -270,90 +286,104 @@ for m in m_list:
         Q = - np.pi * (ufl.inner(Eh_m, Jh_m))
 
         q_abs_fenics_proc = (fem.assemble_scalar(
-                             fem.form(Q * rho * dAu)) / gcs / I0).real
+                             fem.form(2 * Q * rho * dTf)) / gcs).real
         q_abs_fenics = domain.comm.allreduce(q_abs_fenics_proc, op=MPI.SUM)
 
     elif m == m_list[0]:  # initialize and add 2 factor
         Q = - 2 * np.pi * (ufl.inner(Eh_m, Jh_m))
 
         q_abs_fenics_proc = (fem.assemble_scalar(
-            fem.form(Q * rho * dAu)) / gcs / I0).real
+            fem.form(2 * Q * rho * dTf)) / gcs).real
         q_abs_fenics = domain.comm.allreduce(q_abs_fenics_proc, op=MPI.SUM)
 
     else:  # do not initialize and add 2 factor
         Q += - 2 * np.pi * (ufl.inner(Eh_m, Jh_m))
 
         q_abs_fenics_proc = (fem.assemble_scalar(
-            fem.form(Q * rho * dAu)) / gcs / I0).real
+            fem.form(2 * Q * rho * dTf)) / gcs).real
         q_abs_fenics += domain.comm.allreduce(q_abs_fenics_proc, op=MPI.SUM)
 
 print(q_abs_fenics)
-sys.exit()
 
-q_ext_fenics = q_abs_fenics + q_sca_fenics
 
-q_abs_analyt = 0.9622728008329892
-q_sca_analyt = 0.07770397394691526
-q_ext_analyt = q_abs_analyt + q_sca_analyt
+def spherical_in(l, x, derivative=False):
 
-err_abs = np.abs(q_abs_analyt - q_abs_fenics) / q_abs_analyt
-err_sca = np.abs(q_sca_analyt - q_sca_fenics) / q_sca_analyt
-err_ext = np.abs(q_ext_analyt - q_ext_fenics) / q_ext_analyt
+    j = spherical_jn(l, x, derivative=derivative)
+    y = spherical_yn(l, x, derivative=derivative)
 
-if MPI.COMM_WORLD.rank == 0:
+    return j + 1j*y
 
-    print()
-    print(f"The analytical absorption efficiency is {q_abs_analyt}")
-    print(f"The numerical absorption efficiency is {q_abs_fenics}")
-    print(f"The error is {err_abs*100}%")
-    print()
-    print(f"The analytical scattering efficiency is {q_sca_analyt}")
-    print(f"The numerical scattering efficiency is {q_sca_fenics}")
-    print(f"The error is {err_sca*100}%")
-    print()
-    print(f"The analytical extinction efficiency is {q_ext_analyt}")
-    print(f"The numerical extinction efficiency is {q_ext_fenics}")
-    print(f"The error is {err_ext*100}%")
 
-    # Check whether the geometrical or optical parameters ar correct
-    assert radius_sph / wl0 == 0.025 / 0.4
-    assert eps_au == -1.0782 + 1j * 5.8089
+sigma = 1j*epsilon_0*(omega_p / _f_afac)**2/(
+    omega0 / _f_afac + 1j*gamma / _f_afac)
+k_d = k0 * _scaling_m * n_bkg
+eps_m = 1 - sigma/(1j*epsilon_0*omega0 / _f_afac)
+eps_d = eps_bkg
+eps_inf = 1
+k_m = k0 * _scaling_m * np.sqrt(eps_m)
+k_nl = (omega_p / _f_afac / (beta / _beta_afac)
+        ) * np.sqrt(eps_m / (eps_inf * (eps_inf - eps_m)))
+x_d = k_d*radius_sph / _scaling_m
+x_m = k_m*radius_sph / _scaling_m
+x_nl = k_nl*radius_sph / _scaling_m
 
-    assert err_abs < 0.01
-    assert err_sca < 0.01
-    assert err_ext < 0.01
+num_l = 50
+for l in range(1, num_l + 1):
 
-Esh_rz, Esh_p = Esh.split()
+    jl_xd = spherical_jn(l, x_d, derivative=False)
+    jl_xm = spherical_jn(l, x_m, derivative=False)
+    jl_xnl = spherical_jn(l, x_nl, derivative=False)
+    jl_xd_p = spherical_jn(l, x_d, derivative=True)
+    jl_xm_p = spherical_jn(l, x_m, derivative=True)
+    jl_xnl_p = spherical_jn(l, x_nl, derivative=True)
 
+    il_xd = spherical_in(l, x_d, derivative=False)
+    #il_xm = spherical_in(l, x_m, derivative = False)
+    #il_xnl = spherical_in(l, x_nl, derivative = False)
+    il_xd_p = spherical_in(l, x_d, derivative=True)
+    #il_xm_p = spherical_in(l, x_m, derivative = True)
+    #il_xnl_p = spherical_in(l, x_nl, derivative = True)
+
+    delta_l = l*(l+1)*jl_xm*(eps_m - eps_inf)/eps_inf*jl_xnl/x_nl/jl_xnl_p
+
+    tm_num = (-eps_m * jl_xm * (x_d * jl_xd_p + jl_xd) + eps_d * jl_xd *
+              (x_m * jl_xm_p + jl_xm + delta_l))
+
+    tm_den = (
+        eps_m * jl_xm * (x_d * il_xd_p + il_xd) - eps_d * il_xd *
+        (x_m * jl_xm_p + jl_xm + delta_l))
+
+    t_TM = tm_num/tm_den
+
+    te_num = -jl_xm*(x_d*jl_xd_p+jl_xd) + jl_xd*(x_m*jl_xm_p+jl_xm)
+    te_den = jl_xm*(x_d*il_xd_p+il_xd) - il_xd*(x_m*jl_xm_p+jl_xm)
+
+    t_TE = te_num/te_den
+    if l == 1:
+
+        q_ext = 2*np.pi/k_d**2*(2*l+1)*np.real(
+            t_TM + t_TE)/(gcs / _scaling_m**2)
+        q_sca = 2*np.pi/k_d**2*(2*l+1)*(np.abs(t_TM) **
+                                        2 + np.abs(t_TE)**2)/(gcs / _scaling_m**2)
+
+    else:
+
+        q_ext += 2*np.pi/k_d**2*(2*l+1)*np.real(
+            t_TM + t_TE)/(gcs / _scaling_m**2)
+        q_sca += 2*np.pi/k_d**2*(2*l+1)*(np.abs(t_TM)
+                                         ** 2 + np.abs(t_TE)**2)/(gcs / _scaling_m**2)
+
+        q_abs_analyt = -q_ext - q_sca
+
+
+#q_abs_analyt = 3.853975363140860894e-02
+
+print(q_abs_analyt)
+
+V_dg = fem.VectorFunctionSpace(domain, ("DG", degree))
 Esh_rz_dg = fem.Function(V_dg)
-Esh_r_dg = fem.Function(V_dg)
 
-Esh_rz_dg.interpolate(Esh_rz)
+Esh_rz_dg.interpolate(Esh_rz_m)
 
 with VTXWriter(domain.comm, "sols/Es_rz.bp", Esh_rz_dg) as f:
     f.write(0.0)
-with VTXWriter(domain.comm, "sols/Es_p.bp", Esh_p) as f:
-    f.write(0.0)
-
-if have_pyvista:
-    V_cells, V_types, V_x = plot.create_vtk_mesh(V_dg)
-    V_grid = pyvista.UnstructuredGrid(V_cells, V_types, V_x)
-    Esh_r_values = np.zeros((V_x.shape[0], 3), dtype=np.float64)
-    Esh_r_values[:, :domain.topology.dim] = \
-        Esh_r_dg.x.array.reshape(V_x.shape[0], domain.topology.dim).real
-
-    V_grid.point_data["u"] = Esh_r_values
-
-    pyvista.set_jupyter_backend("pythreejs")
-    plotter = pyvista.Plotter()
-
-    plotter.add_text("magnitude", font_size=12, color="black")
-    plotter.add_mesh(V_grid.copy(), show_edges=False)
-    plotter.view_xy()
-    plotter.link_views()
-
-    if not pyvista.OFF_SCREEN:
-        plotter.show()
-    else:
-        pyvista.start_xvfb()
-        plotter.screenshot("Esh_r.png", window_size=[500, 500])
