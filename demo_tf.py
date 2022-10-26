@@ -25,13 +25,10 @@ if not np.issubdtype(PETSc.ScalarType, np.complexfloating):
 
 def curl_axis(a, m: int, rho):
 
-    #curl_r = (-a[2].dx(1) - 1j * m / rho * a[1])
-    #curl_z = (a[2] / rho + a[2].dx(0) + 1j * m / rho * a[0])
-    #curl_p = (a[0].dx(1) - a[1].dx(0))
-
     curl_r = (-a[2].dx(1) - 1j * m / rho * a[1])
-    curl_z = 0 * (a[2] / rho + a[2].dx(0) + 1j * m / rho * a[0])
+    curl_z = (a[2] / rho + a[2].dx(0) + 1j * m / rho * a[0])
     curl_p = (a[0].dx(1) - a[1].dx(0))
+
     return ufl.as_vector((curl_r, curl_z, curl_p))
 
 
@@ -272,6 +269,8 @@ for m in m_list:
     diagonal.array = diagonal_values
     problem._A.setDiagonal(diagonal, PETSc.InsertMode.INSERT_VALUES)
 
+    A_copy = PETSc.Mat().create(MPI.COMM_SELF)
+    A_copy = problem._A.copy()
     # Assemble rhs
     with problem._b.localForm() as b_loc:
         b_loc.set(0)
