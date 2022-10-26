@@ -3,7 +3,7 @@ from functools import partial
 
 import numpy as np
 import ufl
-from dolfinx import fem, plot
+from dolfinx import fem
 from dolfinx.io import VTXWriter
 from dolfinx.io.gmshio import model_to_mesh
 from mpi4py import MPI
@@ -18,12 +18,6 @@ except ModuleNotFoundError:
     print("This demo requires gmsh to be installed")
     sys.exit(0)
 
-try:
-    import pyvista
-    have_pyvista = True
-except ModuleNotFoundError:
-    print("pyvista and pyvistaqt are required to visualise the solution")
-    have_pyvista = False
 if not np.issubdtype(PETSc.ScalarType, np.complexfloating):
     print("Demo should only be executed with DOLFINx complex mode")
     exit(0)
@@ -31,10 +25,13 @@ if not np.issubdtype(PETSc.ScalarType, np.complexfloating):
 
 def curl_axis(a, m: int, rho):
 
-    curl_r = -a[2].dx(1) - 1j * m / rho * a[1]
-    curl_z = a[2] / rho + a[2].dx(0) + 1j * m / rho * a[0]
-    curl_p = a[0].dx(1) - a[1].dx(0)
+    #curl_r = (-a[2].dx(1) - 1j * m / rho * a[1])
+    #curl_z = (a[2] / rho + a[2].dx(0) + 1j * m / rho * a[0])
+    #curl_p = (a[0].dx(1) - a[1].dx(0))
 
+    curl_r = (-a[2].dx(1) - 1j * m / rho * a[1])
+    curl_z = 0 * (a[2] / rho + a[2].dx(0) + 1j * m / rho * a[0])
+    curl_p = (a[0].dx(1) - a[1].dx(0))
     return ufl.as_vector((curl_r, curl_z, curl_p))
 
 
@@ -118,7 +115,7 @@ radius_pml = 0.025
 mesh_factor = 1
 in_sph_size = mesh_factor * 0.08e-3
 on_sph_size = mesh_factor * 0.06e-3
-scatt_size = mesh_factor * 10.0e-3
+scatt_size = mesh_factor * 8.0e-3
 pml_size = mesh_factor * 8.0e-3
 
 tf_tag = 1
@@ -156,12 +153,12 @@ dx = ufl.Measure("dx", domain, subdomain_data=cell_tags,
 dDom = dx((tf_tag, bkg_tag))
 dPml = dx(pml_tag)
 
-wl0 = 0.3  # Wavelength of the background field
+wl0 = 0.30  # Wavelength of the background field
 k0 = 2 * np.pi / wl0  # Wavevector of the background field
 # Angular frequency of the background field
 omega0 = (k0 * _scaling_m * c0) * _f_afac
 theta = np.pi / 2  # Angle of incidence of the background field
-m_list = [0]  # list of harmonics
+m_list = [1]  # list of harmonics
 
 rho, z = ufl.SpatialCoordinate(domain)
 alpha = 5
@@ -219,36 +216,60 @@ for m in m_list:
     div_P_m = div_axis(P_m, m, rho)
     div_k_m = div_axis(k_m, m, rho)
 
-    F = - ufl.inner(curl_Es_m, curl_v_m) * rho * dDom \
-        + k0 ** 2 * ufl.inner(Es_m, v_m) * rho * dDom \
-        + omega0 ** 2 * ufl.inner(P_m, v_m) * rho * dTf \
-        - beta ** 2 * div_P_m * ufl.conj(div_k_m) * rho * dTf \
-        + omega0 ** 2 * ufl.inner(P_m, k_m) * rho * dTf \
-        + 1j * gamma * omega0 * ufl.inner(P_m, k_m) * rho * dTf \
-        + omega_p ** 2 * ufl.inner(Es_m, k_m) * rho * dTf \
-        + omega_p ** 2 * ufl.inner(Eb_m, k_m) * rho * dTf \
-        - ufl.inner(ufl.inv(mu_pml) * curl_Es_m, curl_v_m) * rho * dPml \
-        + k0 ** 2 * ufl.inner(eps_pml * Es_m, v_m) * rho * dPml
+    # F = - ufl.inner(curl_Es_m, curl_v_m) * rho * dDom \
+    #    + k0 ** 2 * ufl.inner(Es_m, v_m) * rho * dDom \
+    #    + omega0 ** 2 * ufl.inner(P_m, v_m) * rho * dTf \
+    #    - beta ** 2 * div_P_m * ufl.conj(div_k_m) * rho * dTf \
+    #    + omega0 ** 2 * ufl.inner(P_m, k_m) * rho * dTf \
+    #    + 1j * gamma * omega0 * ufl.inner(P_m, k_m) * rho * dTf \
+    #    + omega_p ** 2 * ufl.inner(Es_m, k_m) * rho * dTf \
+    #    + omega_p ** 2 * ufl.inner(Eb_m, k_m) * rho * dTf \
+    #    - ufl.inner(ufl.inv(mu_pml) * curl_Es_m, curl_v_m) * rho * dPml \
+    #    + k0 ** 2 * ufl.inner(eps_pml * Es_m, v_m) * rho * dPml
+
+    F = - ufl.inner(curl_Es_m, curl_v_m) * rho * dDom
+    F += + k0 ** 2 * ufl.inner(Es_m, v_m) * rho * dDom
+    F += + omega0 ** 2 * ufl.inner(P_m, v_m) * rho * dTf
+    F += - beta ** 2 * div_P_m * ufl.conj(div_k_m) * rho * dTf
+    F += + omega0 ** 2 * ufl.inner(P_m, k_m) * rho * dTf
+    F += + 1j * gamma * omega0 * ufl.inner(P_m, k_m) * rho * dTf
+    F += + omega_p ** 2 * ufl.inner(Es_m, k_m) * rho * dTf
+    F += + omega_p ** 2 * ufl.inner(Eb_m, k_m) * rho * dTf
+    F += - ufl.inner(ufl.inv(mu_pml) * curl_Es_m, curl_v_m) * rho * dPml
+    F += + k0 ** 2 * ufl.inner(eps_pml * Es_m, v_m) * rho * dPml
 
     a, L = ufl.lhs(F), ufl.rhs(F)
 
     problem = fem.petsc.LinearProblem(a, L, bcs=[bc], petsc_options={
                                       "ksp_type": "preonly", "pc_type": "lu"})
+
     # Assemble lhs
     problem._A.zeroEntries()
 
     fem.petsc._assemble_matrix_mat(problem._A, problem._a, bcs=problem.bcs)
     problem._A.assemble()
 
+    # Get diagonal of assembled A matrix
     diagonal = problem._A.getDiagonal()
     diagonal_values = diagonal.array
+    diagonal_size_arr = np.zeros(domain.comm.size, dtype=np.int32)
+    diagonal_size_arr[domain.comm.rank] = diagonal_values.size
 
+    domain.comm.Allreduce(MPI.IN_PLACE, diagonal_size_arr, op=MPI.SUM)
+    domain.comm.barrier()
+
+    # Get zero rows of assembled A matrix.
     zero_rows = problem._A.findZeroRows()
-    zero_rows_values = zero_rows.array
+    zero_rows_values_global = zero_rows.array
+    zero_rows_values_local = zero_rows_values_global - \
+        np.sum(diagonal_size_arr[:domain.comm.rank])
 
-    diagonal_values[zero_rows_values] = 1
+    print(f"rank: {domain.comm.rank}, local: {zero_rows_values_local}")
+    print(f"rank: {domain.comm.rank}, global: {zero_rows_values_global}")
+
+    # Set diagonal entries of zero rows equal to one
+    diagonal_values[zero_rows_values_local] = 1
     diagonal.array = diagonal_values
-
     problem._A.setDiagonal(diagonal, PETSc.InsertMode.INSERT_VALUES)
 
     # Assemble rhs
@@ -285,6 +306,7 @@ for m in m_list:
 
         q_abs_fenics_proc = (fem.assemble_scalar(
                              fem.form(2 * Q * rho * dTf)) / gcs).real
+        print(q_abs_fenics_proc)
         q_abs_fenics = domain.comm.allreduce(q_abs_fenics_proc, op=MPI.SUM)
 
     elif m == m_list[0]:  # initialize and add 2 factor
@@ -292,16 +314,20 @@ for m in m_list:
 
         q_abs_fenics_proc = (fem.assemble_scalar(
             fem.form(2 * Q * rho * dTf)) / gcs).real
+        print(q_abs_fenics_proc)
         q_abs_fenics = domain.comm.allreduce(q_abs_fenics_proc, op=MPI.SUM)
 
     else:  # do not initialize and add 2 factor
-        Q += - 2 * np.pi * (ufl.inner(Eh_m, Jh_m))
+        Q = - 2 * np.pi * (ufl.inner(Eh_m, Jh_m))
 
         q_abs_fenics_proc = (fem.assemble_scalar(
             fem.form(2 * Q * rho * dTf)) / gcs).real
+        print(q_abs_fenics_proc)
         q_abs_fenics += domain.comm.allreduce(q_abs_fenics_proc, op=MPI.SUM)
 
-print(q_abs_fenics)
+# print(q_abs_fenics)
+
+# Calculation of analytical efficiencies
 
 
 def spherical_in(l, x, derivative=False):
@@ -374,7 +400,7 @@ for l in range(1, num_l + 1):
         q_abs_analyt = -q_ext - q_sca
 
 
-print(q_abs_analyt)
+# print(q_abs_analyt)
 
 V_dg = fem.VectorFunctionSpace(domain, ("DG", degree))
 Esh_rz_dg = fem.Function(V_dg)
