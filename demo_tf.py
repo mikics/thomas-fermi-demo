@@ -258,8 +258,8 @@ for m in m_list:
     # Get zero rows of assembled A matrix.
     zero_rows = problem._A.findZeroRows()
     zero_rows_values_global = zero_rows.array
-    zero_rows_values_local = zero_rows_values_global - \
-        np.sum(diagonal_size_arr[:domain.comm.rank])
+    offset = np.sum(diagonal_size_arr[:domain.comm.rank])
+    zero_rows_values_local = zero_rows_values_global - offset
 
     print(f"rank: {domain.comm.rank}, local: {zero_rows_values_local}")
     print(f"rank: {domain.comm.rank}, global: {zero_rows_values_global}")
@@ -269,8 +269,8 @@ for m in m_list:
     diagonal.array = diagonal_values
     problem._A.setDiagonal(diagonal, PETSc.InsertMode.INSERT_VALUES)
 
-    A_copy = PETSc.Mat().create(MPI.COMM_SELF)
-    A_copy = problem._A.copy()
+    # A_copy = PETSc.Mat().create(MPI.COMM_SELF)
+    # A_copy = problem._A.copy()
     # Assemble rhs
     with problem._b.localForm() as b_loc:
         b_loc.set(0)
