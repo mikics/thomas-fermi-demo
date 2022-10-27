@@ -170,7 +170,7 @@ F += + k0 ** 2 * ufl.inner(eps_pml * Es_m, v_m) * rho * dPml
 a, L = ufl.lhs(F), ufl.rhs(F)
 
 problem = fem.petsc.LinearProblem(a, L, bcs=[bc], petsc_options={
-    "ksp_type": "preonly", "pc_type": "lu"})
+    "ksp_type": "preonly", "pc_type": "asm", "sub_pc_type": "ilu"})
 
 # Assemble lhs
 problem._A.zeroEntries()
@@ -218,3 +218,5 @@ problem.u.x.scatter_forward()
 Esh_rz_m, Esh_p_m, Ph_rz_m, Ph_p_m = problem.u.split()
 
 print(Esh_rz_m.x.array[:])
+
+print(problem._solver.getConvergedReason())
