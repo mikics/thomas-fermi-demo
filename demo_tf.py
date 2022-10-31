@@ -160,8 +160,8 @@ wl0 = 0.3  # Wavelength of the background field
 k0 = 2 * np.pi / wl0  # Wavevector of the background field
 # Angular frequency of the background field
 omega0 = (k0 * _scaling_m * c0) * _f_afac
-theta = np.pi / 2  # Angle of incidence of the background field
-m_list = [0]  # list of harmonics
+theta = np.pi / 4  # Angle of incidence of the background field
+m_list = [0, 1]  # list of harmonics
 
 rho, z = ufl.SpatialCoordinate(domain)
 alpha = 5
@@ -232,8 +232,13 @@ for m in m_list:
 
     a, L = ufl.lhs(F), ufl.rhs(F)
 
-    problem = fem.petsc.LinearProblem(a, L, bcs=[bc], petsc_options={
-                                      "ksp_type": "preonly", "pc_type": "lu"})
+    # With these options it works in serial, but not in parallel
+    # petsc_options = {"ksp_type": "preonly", "pc_type": "lu"}
+
+    # With these options it works in parallel, but does not give correct results
+    petsc_options = {"ksp_type": "cg", "pc_type": "gamg"}
+    problem = fem.petsc.LinearProblem(
+        a, L, bcs=[bc], petsc_options=petsc_options)
     # Assemble lhs
     problem._A.zeroEntries()
 
@@ -244,9 +249,11 @@ for m in m_list:
     diagonal_values = diagonal.array
 
     zero_rows = problem._A.findZeroRows()
-    zero_rows_values = zero_rows.array
+    zero_rows_values_global = zero_rows.array
+    offset = V.dofmap.index_map.local_range[0]*V.dofmap.index_map_bs
+    zero_rows_values_local = zero_rows_values_global - offset
 
-    diagonal_values[zero_rows_values] = 1
+    diagonal_values[zero_rows_values_local] = 1
     diagonal.array = diagonal_values
 
     problem._A.setDiagonal(diagonal, PETSc.InsertMode.INSERT_VALUES)
@@ -295,7 +302,7 @@ for m in m_list:
         q_abs_fenics = domain.comm.allreduce(q_abs_fenics_proc, op=MPI.SUM)
 
     else:  # do not initialize and add 2 factor
-        Q += - 2 * np.pi * (ufl.inner(Eh_m, Jh_m))
+        Q = - 2 * np.pi * (ufl.inner(Eh_m, Jh_m))
 
         q_abs_fenics_proc = (fem.assemble_scalar(
             fem.form(2 * Q * rho * dTf)) / gcs).real
