@@ -1,4 +1,6 @@
+import os
 import sys
+from contextlib import contextmanager
 from functools import partial
 
 import numpy as np
@@ -197,119 +199,6 @@ P_func_space = fem.FunctionSpace(domain, ufl.MixedElement(
 
 Eh_m = fem.Function(E_func_space)
 
-for m in m_list:
-
-    Es_rz_m, Es_p_m, P_rz_m, P_p_m = ufl.TrialFunctions(V)
-    v_rz_m, v_p_m, k_rz_m, k_p_m = ufl.TestFunctions(V)
-
-    Es_m = ufl.as_vector((Es_rz_m[0], Es_rz_m[1], Es_p_m))
-    P_m = ufl.as_vector((P_rz_m[0], P_rz_m[1], P_p_m))
-    v_m = ufl.as_vector((v_rz_m[0], v_rz_m[1], v_p_m))
-    k_m = ufl.as_vector((k_rz_m[0], k_rz_m[1], k_p_m))
-
-    Eb_m = fem.Function(E_func_space)
-    f_rz = partial(background_field_rz, theta, n_bkg, k0, m)
-    f_p = partial(background_field_p, theta, n_bkg, k0, m)
-    Eb_m.sub(0).interpolate(f_rz)
-    Eb_m.sub(1).interpolate(f_p)
-
-    curl_Es_m = curl_axis(Es_m, m, rho)
-    curl_v_m = curl_axis(v_m, m, rho)
-
-    div_P_m = div_axis(P_m, m, rho)
-    div_k_m = div_axis(k_m, m, rho)
-
-    F = - ufl.inner(curl_Es_m, curl_v_m) * rho * dDom \
-        + k0 ** 2 * ufl.inner(Es_m, v_m) * rho * dDom \
-        + omega0 ** 2 * ufl.inner(P_m, v_m) * rho * dTf \
-        - beta ** 2 * div_P_m * ufl.conj(div_k_m) * rho * dTf \
-        + omega0 ** 2 * ufl.inner(P_m, k_m) * rho * dTf \
-        + 1j * gamma * omega0 * ufl.inner(P_m, k_m) * rho * dTf \
-        + omega_p ** 2 * ufl.inner(Es_m, k_m) * rho * dTf \
-        + omega_p ** 2 * ufl.inner(Eb_m, k_m) * rho * dTf \
-        - ufl.inner(ufl.inv(mu_pml) * curl_Es_m, curl_v_m) * rho * dPml \
-        + k0 ** 2 * ufl.inner(eps_pml * Es_m, v_m) * rho * dPml
-
-    a, L = ufl.lhs(F), ufl.rhs(F)
-
-    # With these options it works in serial, but not in parallel
-    # petsc_options = {"ksp_type": "preonly", "pc_type": "lu"}
-
-    # With these options it works in parallel, but does not give correct results
-    petsc_options = {"ksp_type": "cg", "pc_type": "gamg"}
-    problem = fem.petsc.LinearProblem(
-        a, L, bcs=[bc], petsc_options=petsc_options)
-    # Assemble lhs
-    problem._A.zeroEntries()
-
-    fem.petsc._assemble_matrix_mat(problem._A, problem._a, bcs=problem.bcs)
-    problem._A.assemble()
-
-    diagonal = problem._A.getDiagonal()
-    diagonal_values = diagonal.array
-
-    zero_rows = problem._A.findZeroRows()
-    zero_rows_values_global = zero_rows.array
-    offset = V.dofmap.index_map.local_range[0]*V.dofmap.index_map_bs
-    zero_rows_values_local = zero_rows_values_global - offset
-
-    diagonal_values[zero_rows_values_local] = 1
-    diagonal.array = diagonal_values
-
-    problem._A.setDiagonal(diagonal, PETSc.InsertMode.INSERT_VALUES)
-
-    # Assemble rhs
-    with problem._b.localForm() as b_loc:
-        b_loc.set(0)
-    fem.petsc.assemble_vector(problem._b, problem._L)
-
-    # Apply boundary conditions to the rhs
-    fem.petsc.apply_lifting(problem._b, [problem._a], bcs=[problem.bcs])
-    problem._b.ghostUpdate(addv=PETSc.InsertMode.ADD,
-                           mode=PETSc.ScatterMode.REVERSE)
-    fem.petsc.set_bc(problem._b, problem.bcs)
-
-    # Solve linear system and update ghost values in the solution
-    problem._solver.solve(problem._b, problem._x)
-    problem.u.x.scatter_forward()
-
-    Esh_rz_m, Esh_p_m, Ph_rz_m, Ph_p_m = problem.u.split()
-
-    Esh_m = fem.Function(E_func_space)
-    Esh_m.sub(0).interpolate(Esh_rz_m)
-    Esh_m.sub(1).interpolate(Esh_p_m)
-
-    Ph_m = fem.Function(P_func_space)
-    Ph_m.sub(0).interpolate(Ph_rz_m)
-    Ph_m.sub(1).interpolate(Ph_p_m)
-
-    Jh_m = 1j * omega0 * Ph_m
-
-    Eh_m.x.array[:] = Eb_m.x.array[:] + Esh_m.x.array[:]
-
-    if m == 0:  # initialize and do not add 2 factor
-        Q = - np.pi * (ufl.inner(Eh_m, Jh_m))
-
-        q_abs_fenics_proc = (fem.assemble_scalar(
-                             fem.form(2 * Q * rho * dTf)) / gcs).real
-        q_abs_fenics = domain.comm.allreduce(q_abs_fenics_proc, op=MPI.SUM)
-
-    elif m == m_list[0]:  # initialize and add 2 factor
-        Q = - 2 * np.pi * (ufl.inner(Eh_m, Jh_m))
-
-        q_abs_fenics_proc = (fem.assemble_scalar(
-            fem.form(2 * Q * rho * dTf)) / gcs).real
-        q_abs_fenics = domain.comm.allreduce(q_abs_fenics_proc, op=MPI.SUM)
-
-    else:  # do not initialize and add 2 factor
-        Q = - 2 * np.pi * (ufl.inner(Eh_m, Jh_m))
-
-        q_abs_fenics_proc = (fem.assemble_scalar(
-            fem.form(2 * Q * rho * dTf)) / gcs).real
-        q_abs_fenics += domain.comm.allreduce(q_abs_fenics_proc, op=MPI.SUM)
-
-print(q_abs_fenics)
-
 
 def spherical_in(l, x, derivative=False):
 
@@ -381,7 +270,153 @@ for l in range(1, num_l + 1):
         q_abs_analyt = -q_ext - q_sca
 
 
-print(q_abs_analyt)
+petsc_options_list = []
+
+if MPI.COMM_WORLD.size > 1:
+    # petsc_options_list.append(
+    #    {"ksp_type": "preonly", "pc_type": "lu",
+    #     "pc_factor_mat_solver_type": "mkl_cpardiso"})
+
+    petsc_options_list.append(
+        {"pc_type": "asm",
+         "sub_pc_type": "ilu"})
+
+    petsc_options_list.append(
+        {"ksp_type": "preonly", "pc_type": "lu",
+         "pc_factor_mat_solver_type": "mumps"})
+
+else:
+    petsc_options_list.append({"ksp_type": "preonly", "pc_type": "lu"})
+    petsc_options_list.append({"ksp_type": "preonly", "pc_type": "cholesky"})
+    petsc_options_list.append({"ksp_type": "gmres", "pc_type": "cholesky"})
+    petsc_options_list.append({"ksp_type": "cg", "pc_type": "gamg"})
+    petsc_options_list.append({"ksp_type": "cg", "pc_type": "jacobi"})
+
+for petsc_options in petsc_options_list:
+
+    for m in m_list:
+
+        Es_rz_m, Es_p_m, P_rz_m, P_p_m = ufl.TrialFunctions(V)
+        v_rz_m, v_p_m, k_rz_m, k_p_m = ufl.TestFunctions(V)
+
+        Es_m = ufl.as_vector((Es_rz_m[0], Es_rz_m[1], Es_p_m))
+        P_m = ufl.as_vector((P_rz_m[0], P_rz_m[1], P_p_m))
+        v_m = ufl.as_vector((v_rz_m[0], v_rz_m[1], v_p_m))
+        k_m = ufl.as_vector((k_rz_m[0], k_rz_m[1], k_p_m))
+
+        Eb_m = fem.Function(E_func_space)
+        f_rz = partial(background_field_rz, theta, n_bkg, k0, m)
+        f_p = partial(background_field_p, theta, n_bkg, k0, m)
+        Eb_m.sub(0).interpolate(f_rz)
+        Eb_m.sub(1).interpolate(f_p)
+
+        curl_Es_m = curl_axis(Es_m, m, rho)
+        curl_v_m = curl_axis(v_m, m, rho)
+
+        div_P_m = div_axis(P_m, m, rho)
+        div_k_m = div_axis(k_m, m, rho)
+
+        F = - ufl.inner(curl_Es_m, curl_v_m) * rho * dDom \
+            + k0 ** 2 * ufl.inner(Es_m, v_m) * rho * dDom \
+            + omega0 ** 2 * ufl.inner(P_m, v_m) * rho * dTf \
+            - beta ** 2 * div_P_m * ufl.conj(div_k_m) * rho * dTf \
+            + omega0 ** 2 * ufl.inner(P_m, k_m) * rho * dTf \
+            + 1j * gamma * omega0 * ufl.inner(P_m, k_m) * rho * dTf \
+            + omega_p ** 2 * ufl.inner(Es_m, k_m) * rho * dTf \
+            + omega_p ** 2 * ufl.inner(Eb_m, k_m) * rho * dTf \
+            - ufl.inner(ufl.inv(mu_pml) * curl_Es_m, curl_v_m) * rho * dPml \
+            + k0 ** 2 * ufl.inner(eps_pml * Es_m, v_m) * rho * dPml
+
+        a, L = ufl.lhs(F), ufl.rhs(F)
+
+        problem = fem.petsc.LinearProblem(
+            a, L, bcs=[bc], petsc_options=petsc_options)
+
+        problem._A.zeroEntries()
+
+        fem.petsc._assemble_matrix_mat(
+            problem._A, problem._a, bcs=problem.bcs)
+        problem._A.assemble()
+
+        diagonal = problem._A.getDiagonal()
+        diagonal_values = diagonal.array
+
+        zero_rows = problem._A.findZeroRows()
+        zero_rows_values_global = zero_rows.array
+        offset = V.dofmap.index_map.local_range[0]*V.dofmap.index_map_bs
+        zero_rows_values_local = zero_rows_values_global - offset
+
+        diagonal_values[zero_rows_values_local] = 1
+        diagonal.array = diagonal_values
+
+        problem._A.setDiagonal(diagonal, PETSc.InsertMode.INSERT_VALUES)
+
+        # Assemble rhs
+        with problem._b.localForm() as b_loc:
+            b_loc.set(0)
+        fem.petsc.assemble_vector(problem._b, problem._L)
+
+        # Apply boundary conditions to the rhs
+        fem.petsc.apply_lifting(
+            problem._b, [problem._a],
+            bcs=[problem.bcs])
+        problem._b.ghostUpdate(addv=PETSc.InsertMode.ADD,
+                               mode=PETSc.ScatterMode.REVERSE)
+        fem.petsc.set_bc(problem._b, problem.bcs)
+
+        # Solve linear system and update ghost values in the solution
+        problem._solver.solve(problem._b, problem._x)
+        problem.u.x.scatter_forward()
+
+        Esh_rz_m, Esh_p_m, Ph_rz_m, Ph_p_m = problem.u.split()
+
+        Esh_m = fem.Function(E_func_space)
+        Esh_m.sub(0).interpolate(Esh_rz_m)
+        Esh_m.sub(1).interpolate(Esh_p_m)
+
+        Ph_m = fem.Function(P_func_space)
+        Ph_m.sub(0).interpolate(Ph_rz_m)
+        Ph_m.sub(1).interpolate(Ph_p_m)
+
+        Jh_m = 1j * omega0 * Ph_m
+
+        Eh_m.x.array[:] = Eb_m.x.array[:] + Esh_m.x.array[:]
+
+        if m == 0:  # initialize and do not add 2 factor
+            Q = - np.pi * (ufl.inner(Eh_m, Jh_m))
+
+            q_abs_fenics_proc = (fem.assemble_scalar(
+                                 fem.form(2 * Q * rho * dTf)) / gcs).real
+            q_abs_fenics = domain.comm.allreduce(
+                q_abs_fenics_proc, op=MPI.SUM)
+
+        elif m == m_list[0]:  # initialize and add 2 factor
+            Q = - 2 * np.pi * (ufl.inner(Eh_m, Jh_m))
+
+            q_abs_fenics_proc = (fem.assemble_scalar(
+                fem.form(2 * Q * rho * dTf)) / gcs).real
+            q_abs_fenics = domain.comm.allreduce(
+                q_abs_fenics_proc, op=MPI.SUM)
+
+        else:  # do not initialize and add 2 factor
+            Q = - 2 * np.pi * (ufl.inner(Eh_m, Jh_m))
+
+            q_abs_fenics_proc = (fem.assemble_scalar(
+                fem.form(2 * Q * rho * dTf)) / gcs).real
+            q_abs_fenics += domain.comm.allreduce(
+                q_abs_fenics_proc, op=MPI.SUM)
+
+    if MPI.COMM_WORLD.rank == 0:
+
+        print(q_abs_fenics)
+
+        print(q_abs_analyt)
+
+        error = np.abs(q_abs_fenics - q_abs_analyt)/q_abs_analyt*100
+
+        error_string_list = []
+        error_string_list.append(
+            f"The error is {error}%, with {petsc_options}")
 
 V_dg = fem.VectorFunctionSpace(domain, ("DG", degree))
 Esh_rz_dg = fem.Function(V_dg)
@@ -390,3 +425,8 @@ Esh_rz_dg.interpolate(Esh_rz_m)
 
 with VTXWriter(domain.comm, "sols/Es_rz.bp", Esh_rz_dg) as f:
     f.write(0.0)
+
+if MPI.COMM_WORLD.rank == 0:
+
+    for error_string in error_string_list:
+        print(error_string)
