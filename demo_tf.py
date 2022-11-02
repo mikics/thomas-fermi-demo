@@ -1,33 +1,41 @@
+from mesh_sphere_axis import generate_mesh_sphere_axis
+from efficiencies import calculate_analytical_efficiencies
+from scipy.special import jv, jvp, spherical_jn, spherical_yn
+from petsc4py import PETSc
+from mpi4py import MPI
+from dolfinx.io.gmshio import model_to_mesh
+from dolfinx.io import VTXWriter
+from dolfinx import fem, plot
+import ufl
+import numpy as np
 import os
 import sys
 from contextlib import contextmanager
 from functools import partial
+from colorama import Fore, Back, Style, init
+init(autoreset=True)
 
-import numpy as np
-import ufl
-from dolfinx import fem, plot
-from dolfinx.io import VTXWriter
-from dolfinx.io.gmshio import model_to_mesh
-from mpi4py import MPI
-from petsc4py import PETSc
-from scipy.special import jv, jvp, spherical_jn, spherical_yn
+def print_once(to_print: str = ''):
 
-from mesh_sphere_axis import generate_mesh_sphere_axis
+    if MPI.COMM_WORLD.rank == 0:
+
+        print(to_print)
+
 
 try:
     import gmsh
 except ModuleNotFoundError:
-    print("This demo requires gmsh to be installed")
+    print_once("This demo requires gmsh to be installed")
     sys.exit(0)
 
 try:
     import pyvista
     have_pyvista = True
 except ModuleNotFoundError:
-    print("pyvista and pyvistaqt are required to visualise the solution")
+    print_once("pyvista and pyvistaqt are required to visualise the solution")
     have_pyvista = False
 if not np.issubdtype(PETSc.ScalarType, np.complexfloating):
-    print("Demo should only be executed with DOLFINx complex mode")
+    print_once("Demo should only be executed with DOLFINx complex mode")
     exit(0)
 
 
@@ -158,12 +166,11 @@ dx = ufl.Measure("dx", domain, subdomain_data=cell_tags,
 dDom = dx((tf_tag, bkg_tag))
 dPml = dx(pml_tag)
 
-wl0 = 0.3  # Wavelength of the background field
-k0 = 2 * np.pi / wl0  # Wavevector of the background field
-# Angular frequency of the background field
+wl0 = 0.3
+k0 = 2 * np.pi / wl0
 omega0 = (k0 * _scaling_m * c0) * _f_afac
-theta = np.pi / 4  # Angle of incidence of the background field
-m_list = [0, 1]  # list of harmonics
+theta = np.pi / 4
+m_list = [0, 1]
 
 rho, z = ufl.SpatialCoordinate(domain)
 alpha = 5
@@ -199,102 +206,30 @@ P_func_space = fem.FunctionSpace(domain, ufl.MixedElement(
 
 Eh_m = fem.Function(E_func_space)
 
-
-def spherical_in(l, x, derivative=False):
-
-    j = spherical_jn(l, x, derivative=derivative)
-    y = spherical_yn(l, x, derivative=derivative)
-
-    return j + 1j*y
-
-
-sigma = 1j*epsilon_0*(omega_p / _f_afac)**2/(
-    omega0 / _f_afac + 1j*gamma / _f_afac)
-k_d = k0 * _scaling_m * n_bkg
-eps_m = 1 - sigma/(1j*epsilon_0*omega0 / _f_afac)
-eps_d = eps_bkg
-eps_inf = 1
-k_m = k0 * _scaling_m * np.sqrt(eps_m)
-k_nl = (omega_p / _f_afac / (beta / _beta_afac)
-        ) * np.sqrt(eps_m / (eps_inf * (eps_inf - eps_m)))
-x_d = k_d*radius_sph / _scaling_m
-x_m = k_m*radius_sph / _scaling_m
-x_nl = k_nl*radius_sph / _scaling_m
-
-num_l = 50
-for l in range(1, num_l + 1):
-
-    jl_xd = spherical_jn(l, x_d, derivative=False)
-    jl_xm = spherical_jn(l, x_m, derivative=False)
-    jl_xnl = spherical_jn(l, x_nl, derivative=False)
-    jl_xd_p = spherical_jn(l, x_d, derivative=True)
-    jl_xm_p = spherical_jn(l, x_m, derivative=True)
-    jl_xnl_p = spherical_jn(l, x_nl, derivative=True)
-
-    il_xd = spherical_in(l, x_d, derivative=False)
-    #il_xm = spherical_in(l, x_m, derivative = False)
-    #il_xnl = spherical_in(l, x_nl, derivative = False)
-    il_xd_p = spherical_in(l, x_d, derivative=True)
-    #il_xm_p = spherical_in(l, x_m, derivative = True)
-    #il_xnl_p = spherical_in(l, x_nl, derivative = True)
-
-    delta_l = l*(l+1)*jl_xm*(eps_m - eps_inf)/eps_inf*jl_xnl/x_nl/jl_xnl_p
-
-    tm_num = (-eps_m * jl_xm * (x_d * jl_xd_p + jl_xd) + eps_d * jl_xd *
-              (x_m * jl_xm_p + jl_xm + delta_l))
-
-    tm_den = (
-        eps_m * jl_xm * (x_d * il_xd_p + il_xd) - eps_d * il_xd *
-        (x_m * jl_xm_p + jl_xm + delta_l))
-
-    t_TM = tm_num/tm_den
-
-    te_num = -jl_xm*(x_d*jl_xd_p+jl_xd) + jl_xd*(x_m*jl_xm_p+jl_xm)
-    te_den = jl_xm*(x_d*il_xd_p+il_xd) - il_xd*(x_m*jl_xm_p+jl_xm)
-
-    t_TE = te_num/te_den
-    if l == 1:
-
-        q_ext = 2*np.pi/k_d**2*(2*l+1)*np.real(
-            t_TM + t_TE)/(gcs / _scaling_m**2)
-        q_sca = 2*np.pi/k_d**2*(2*l+1)*(np.abs(t_TM) **
-                                        2 + np.abs(t_TE)**2)/(gcs / _scaling_m**2)
-
-    else:
-
-        q_ext += 2*np.pi/k_d**2*(2*l+1)*np.real(
-            t_TM + t_TE)/(gcs / _scaling_m**2)
-        q_sca += 2*np.pi/k_d**2*(2*l+1)*(np.abs(t_TM)
-                                         ** 2 + np.abs(t_TE)**2)/(gcs / _scaling_m**2)
-
-        q_abs_analyt = -q_ext - q_sca
-
+q_abs_analyt = calculate_analytical_efficiencies(
+    radius_sph, gcs, k0, omega0, gamma, omega_p, beta, _scaling_m, _f_afac, _beta_afac)
 
 petsc_options_list = []
 
-if MPI.COMM_WORLD.size > 1:
-    # petsc_options_list.append(
-    #    {"ksp_type": "preonly", "pc_type": "lu",
-    #     "pc_factor_mat_solver_type": "mkl_cpardiso"})
+if MPI.COMM_WORLD.size > 1: # parallel
 
     petsc_options_list.append(
-        {"pc_type": "asm",
-         "sub_pc_type": "ilu"})
+        {"ksp_type": "gmres", "pc_type": "asm",
+        "pc_asm_overlap": 1})
 
-    petsc_options_list.append(
-        {"ksp_type": "preonly", "pc_type": "lu",
-         "pc_factor_mat_solver_type": "mumps"})
-
-else:
+else: # serial
     petsc_options_list.append({"ksp_type": "preonly", "pc_type": "lu"})
-    petsc_options_list.append({"ksp_type": "preonly", "pc_type": "cholesky"})
-    petsc_options_list.append({"ksp_type": "gmres", "pc_type": "cholesky"})
-    petsc_options_list.append({"ksp_type": "cg", "pc_type": "gamg"})
-    petsc_options_list.append({"ksp_type": "cg", "pc_type": "jacobi"})
 
 for petsc_options in petsc_options_list:
 
+    print_once()
+    print_once(f"Now solving with {petsc_options}...")
+    print_once()
+
     for m in m_list:
+
+        print_once(f"\t Now solving for m = {m}...")
+        print_once()
 
         Es_rz_m, Es_p_m, P_rz_m, P_p_m = ufl.TrialFunctions(V)
         v_rz_m, v_p_m, k_rz_m, k_p_m = ufl.TestFunctions(V)
@@ -351,12 +286,16 @@ for petsc_options in petsc_options_list:
 
         problem._A.setDiagonal(diagonal, PETSc.InsertMode.INSERT_VALUES)
 
-        # Assemble rhs
+        if m == 0:
+            norm_0 = problem._A.norm(0)
+
+        if m == 1:
+            norm_1 = problem._A.norm(0)
+
         with problem._b.localForm() as b_loc:
             b_loc.set(0)
         fem.petsc.assemble_vector(problem._b, problem._L)
 
-        # Apply boundary conditions to the rhs
         fem.petsc.apply_lifting(
             problem._b, [problem._a],
             bcs=[problem.bcs])
@@ -364,9 +303,14 @@ for petsc_options in petsc_options_list:
                                mode=PETSc.ScatterMode.REVERSE)
         fem.petsc.set_bc(problem._b, problem.bcs)
 
-        # Solve linear system and update ghost values in the solution
         problem._solver.solve(problem._b, problem._x)
         problem.u.x.scatter_forward()
+
+        if m == 0:
+            reason_0 = problem._solver.getConvergedReason()
+
+        if m == 1:
+            reason_1 = problem._solver.getConvergedReason()
 
         Esh_rz_m, Esh_p_m, Ph_rz_m, Ph_p_m = problem.u.split()
 
@@ -408,15 +352,21 @@ for petsc_options in petsc_options_list:
 
     if MPI.COMM_WORLD.rank == 0:
 
-        print(q_abs_fenics)
-
-        print(q_abs_analyt)
-
         error = np.abs(q_abs_fenics - q_abs_analyt)/q_abs_analyt*100
 
-        error_string_list = []
-        error_string_list.append(
-            f"The error is {error}%, with {petsc_options}")
+        if error < 1:
+            color = Fore.GREEN
+
+        else:
+            color = Fore.RED
+
+        print_once(f"The numerical efficiency is: {q_abs_fenics}")
+        print_once(f"The analytical efficiency is: {q_abs_analyt}")
+        print_once(color + f"The error is {error}%, with {petsc_options}")
+        print_once(f"The matrix norm for m==0 is {norm_0}")
+        print_once(f"The matrix norm for m==1 is {norm_1}")
+        print_once(f"The converged reason for m==0 is {reason_0}")
+        print_once(f"The converged reason for m==1 is {reason_1}")
 
 V_dg = fem.VectorFunctionSpace(domain, ("DG", degree))
 Esh_rz_dg = fem.Function(V_dg)
@@ -425,8 +375,3 @@ Esh_rz_dg.interpolate(Esh_rz_m)
 
 with VTXWriter(domain.comm, "sols/Es_rz.bp", Esh_rz_dg) as f:
     f.write(0.0)
-
-if MPI.COMM_WORLD.rank == 0:
-
-    for error_string in error_string_list:
-        print(error_string)
