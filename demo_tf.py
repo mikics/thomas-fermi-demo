@@ -214,8 +214,8 @@ petsc_options_list = []
 if MPI.COMM_WORLD.size > 1: # parallel
 
     petsc_options_list.append(
-        {"ksp_type": "gmres", "pc_type": "asm",
-        "pc_asm_overlap": 1})
+        {"ksp_type": "gmres", "pc_type": "asm", "ksp_max_it": 5000,
+        "pc_asm_overlap": 4})
 
 else: # serial
     petsc_options_list.append({"ksp_type": "preonly", "pc_type": "lu"})
@@ -308,9 +308,11 @@ for petsc_options in petsc_options_list:
 
         if m == 0:
             reason_0 = problem._solver.getConvergedReason()
+            print_once(f"The converged reason for m==0 is {reason_0}")
 
         if m == 1:
             reason_1 = problem._solver.getConvergedReason()
+            print_once(f"The converged reason for m==1 is {reason_1}")
 
         Esh_rz_m, Esh_p_m, Ph_rz_m, Ph_p_m = problem.u.split()
 
